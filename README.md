@@ -1,8 +1,8 @@
 # Rondo - Classical Performance Analysis Tool
 
-A comprehensive web application that analyzes where a classical musician's performance diverges from the score using advanced AI transcription and alignment algorithms.
+A web app that analyzes where a classical musician's performance diverges from the score using AI transcription and alignment algorithms.
 
-## 🎵 Features
+## Features
 
 - **Score Ingestion**: MusicXML/MXL/MEI parsing, PDF OMR conversion using Audiveris
 - **Audio Processing**: AI-powered transcription from WAV/MP3 to symbolic notation using Basic Pitch
@@ -11,7 +11,7 @@ A comprehensive web application that analyzes where a classical musician's perfo
 - **Export Options**: CSV reports and detailed analysis metrics
 - **Real-time Processing**: Background job processing with progress tracking
 
-## 🏗️ Architecture
+## Architecture
 
 - **Frontend**: Next.js/React with Tailwind CSS and Verovio for notation rendering
 - **Backend**: FastAPI with async processing and Celery job queues
@@ -21,7 +21,7 @@ A comprehensive web application that analyzes where a classical musician's perfo
 - **Cache**: Redis for job queues and session management
 - **Storage**: Local filesystem (S3-ready for production)
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -128,7 +128,7 @@ rondo/
 └── start.sh             # Development startup script
 ```
 
-## 🔧 Configuration
+## Configuration
 
 ### Environment Variables
 
@@ -162,7 +162,7 @@ MAX_FILE_SIZE=104857600
 - **ReDoc**: http://localhost:8000/redoc
 - **Full Documentation**: See `docs/API_DOCUMENTATION.md`
 
-## 🧪 Testing
+## Testing
 
 ```bash
 # Run backend tests
@@ -201,7 +201,7 @@ npm test
 - **Measure Heatmaps**: Accuracy visualization by measure
 - **Interactive Score**: Clickable notation with detailed information
 
-## 🚀 Deployment
+## Deployment
 
 ### Development
 ```bash
@@ -223,7 +223,7 @@ docker-compose logs -f
 - **Load Balancing**: Use nginx or cloud load balancer
 - **Monitoring**: Add Prometheus/Grafana for metrics
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch
@@ -231,11 +231,11 @@ docker-compose logs -f
 4. Add tests
 5. Submit a pull request
 
-## 📄 License
+## License
 
 MIT License - see LICENSE file for details
 
-## 🆘 Support
+## Support
 
 - **Documentation**: Check `docs/` directory
 - **Known Issues**: See `docs/KNOWN_LIMITATIONS.md`
@@ -260,4 +260,4 @@ MIT License - see LICENSE file for details
 
 ---
 
-**Built with ❤️ for classical musicians and music educators**
+**Built with love for classical musicians and music educators**
