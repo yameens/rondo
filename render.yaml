@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: rondo-backend
+    env: python
+    buildCommand: pip install -r backend/requirements-minimal.txt
+    startCommand: cd backend && uvicorn app.demo:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+    healthCheckPath: /health
+    autoDeploy: true
+
+  - type: web
+    name: rondo-frontend
+    env: node
+    buildCommand: cd frontend && npm install && npm run build
+    startCommand: cd frontend && npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 18.0.0
+      - key: NEXT_PUBLIC_API_URL
+        value: https://rondo-backend.onrender.com
+    autoDeploy: true
