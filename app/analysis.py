@@ -361,6 +361,10 @@ def resample_to_common_timebase(
     ref_indices = wp[:, 0]
     user_indices = wp[:, 1]
     
+    # Ensure indices are within bounds
+    ref_indices = np.clip(ref_indices, 0, len(features_ref['frame_times']) - 1)
+    user_indices = np.clip(user_indices, 0, len(features_user['frame_times']) - 1)
+    
     # Get aligned features at warping path points
     ref_aligned_times = features_ref['frame_times'][ref_indices]
     user_aligned_times = features_user['frame_times'][user_indices]
