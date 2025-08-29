@@ -25,6 +25,17 @@ try:
 except ImportError:
     BASIC_PITCH_AVAILABLE = False
 
+# Piano transcription imports (new, better than Basic Pitch)
+try:
+    from .onsets_frames_integration import (
+        transcribe_piano_to_notes,
+        extract_onset_times_from_notes,
+        extract_beat_times_from_notes
+    )
+    PIANO_TRANSCRIPTION_AVAILABLE = True
+except ImportError:
+    PIANO_TRANSCRIPTION_AVAILABLE = False
+
 
 # Analysis parameters
 TARGET_SR = 22050
@@ -63,16 +74,9 @@ def load_audio(file_path: str) -> Tuple[np.ndarray, float]:
     return y, duration
 
 
-def extract_features(y: np.ndarray, sr: int = TARGET_SR) -> Dict:
+def _extract_features_librosa(y: np.ndarray, sr: int) -> Tuple[np.ndarray, np.ndarray, float]:
     """
-    Extract comprehensive audio features for analysis.
-    
-    Args:
-        y: Audio time series
-        sr: Sample rate
-        
-    Returns:
-        Dictionary containing extracted features
+    Fallback feature extraction using traditional librosa methods.
     """
     # Onset strength envelope
     onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP_LENGTH)
@@ -84,6 +88,59 @@ def extract_features(y: np.ndarray, sr: int = TARGET_SR) -> Dict:
         hop_length=HOP_LENGTH,
         units='time'
     )
+    
+    return onset_env, beats, tempo
+
+
+def extract_features(y: np.ndarray, sr: int = TARGET_SR, audio_path: str = None) -> Dict:
+    """
+    Extract comprehensive audio features for analysis.
+    
+    Args:
+        y: Audio time series
+        sr: Sample rate
+        audio_path: Path to audio file (for piano transcription)
+        
+    Returns:
+        Dictionary containing extracted features
+    """
+    # Try piano transcription first (much better for piano music)
+    if PIANO_TRANSCRIPTION_AVAILABLE and audio_path:
+        try:
+            notes = transcribe_piano_to_notes(audio_path)
+            if notes:
+                # Use transcribed notes for better onset and beat detection
+                onset_times = extract_onset_times_from_notes(notes)
+                beats = extract_beat_times_from_notes(notes)
+                
+                # Create onset strength envelope from transcribed onsets
+                duration = len(y) / sr
+                frame_times = librosa.frames_to_time(np.arange(len(y) // HOP_LENGTH), sr=sr, hop_length=HOP_LENGTH)
+                onset_env = np.zeros(len(frame_times))
+                
+                # Place onset strength at transcribed onset times
+                for onset_time in onset_times:
+                    frame_idx = np.argmin(np.abs(frame_times - onset_time))
+                    if frame_idx < len(onset_env):
+                        onset_env[frame_idx] = 1.0
+                
+                # Estimate tempo from beat intervals
+                if len(beats) > 1:
+                    beat_intervals = np.diff(beats)
+                    tempo = 60.0 / np.median(beat_intervals)
+                else:
+                    tempo = 120.0  # Default tempo
+                
+                logger.info(f"Used piano transcription for feature extraction: {len(notes)} notes, {len(beats)} beats")
+            else:
+                # Fall back to librosa if transcription fails
+                onset_env, beats, tempo = _extract_features_librosa(y, sr)
+        except Exception as e:
+            logger.warning(f"Piano transcription failed, falling back to librosa: {e}")
+            onset_env, beats, tempo = _extract_features_librosa(y, sr)
+    else:
+        # Use traditional librosa approach
+        onset_env, beats, tempo = _extract_features_librosa(y, sr)
     
     # Ensure beats is always an array
     if np.isscalar(beats):
@@ -800,7 +857,7 @@ def detect_midi_issues(ref_notes: List[Dict], user_notes: List[Dict], matched_pa
 
 def analyze_midi_performance(user_wav_path: str, ref_wav_path: str) -> Dict:
     """
-    Perform MIDI-based performance analysis.
+    Perform MIDI-based performance analysis using piano transcription.
     
     Args:
         user_wav_path: Path to user's audio file
@@ -809,17 +866,56 @@ def analyze_midi_performance(user_wav_path: str, ref_wav_path: str) -> Dict:
     Returns:
         MIDI analysis results dictionary
     """
-    # Check if Basic Pitch is available and enabled
+    # Try piano transcription first (much better than Basic Pitch)
+    if PIANO_TRANSCRIPTION_AVAILABLE:
+        try:
+            # Extract notes from both audio files using piano transcription
+            ref_notes = transcribe_piano_to_notes(ref_wav_path)
+            user_notes = transcribe_piano_to_notes(user_wav_path)
+            
+            if not ref_notes or not user_notes:
+                return {
+                    'available': False,
+                    'reason': 'Piano transcription returned no notes'
+                }
+            
+            # Align notes
+            matched_pairs, alignment_stats = align_midi_notes(ref_notes, user_notes)
+            
+            # Detect issues
+            midi_issues = detect_midi_issues(ref_notes, user_notes, matched_pairs)
+            
+            return {
+                'available': True,
+                'ref_notes': len(ref_notes),
+                'user_notes': len(user_notes),
+                'matched_notes': len(matched_pairs),
+                'precision': alignment_stats['precision'],
+                'recall': alignment_stats['recall'],
+                'f1': alignment_stats['f1'],
+                'alignment_stats': alignment_stats,
+                'issues': midi_issues,
+                'note_events': {
+                    'reference': ref_notes,
+                    'user': user_notes,
+                    'matched_pairs': [(ref.copy(), u.copy()) for ref, u in matched_pairs]
+                }
+            }
+            
+        except Exception as e:
+            logger.warning(f"Piano transcription failed: {e}")
+    
+    # Fall back to Basic Pitch if available and enabled
     basic_pitch_enabled = os.getenv('BASIC_PITCH', 'false').lower() == 'true'
     
     if not BASIC_PITCH_AVAILABLE or not basic_pitch_enabled:
         return {
             'available': False,
-            'reason': 'Basic Pitch not available' if not BASIC_PITCH_AVAILABLE else 'BASIC_PITCH env flag not set'
+            'reason': 'Neither piano transcription nor Basic Pitch available'
         }
     
     try:
-        # Extract notes from both audio files
+        # Extract notes from both audio files using Basic Pitch
         ref_notes = extract_midi_notes(ref_wav_path)
         user_notes = extract_midi_notes(user_wav_path)
         
@@ -1009,8 +1105,8 @@ def analyze_audio_pair(user_wav_path: str, ref_wav_path: str) -> Dict:
     trim_confidence = "disabled"
     
     # 3. Extract features from full user audio and reference
-    features_user = extract_features(y_user_trimmed, TARGET_SR)
-    features_ref = extract_features(y_ref, TARGET_SR)
+    features_user = extract_features(y_user_trimmed, TARGET_SR, user_wav_path)
+    features_ref = extract_features(y_ref, TARGET_SR, ref_wav_path)
     
     # 3. Align using DTW on chroma features
     try:

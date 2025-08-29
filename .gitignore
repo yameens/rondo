@@ -80,6 +80,10 @@ Thumbs.db
 report_*.json
 report_*.csv
 
+# Remove the specific report files we created for testing
+report_864e3c7f-7403-4075-8edd-c8fdc87bdd64.json
+report_864e3c7f-7403-4075-8edd-c8fdc87bdd64.csv
+
 # Docker
 .dockerignore
 

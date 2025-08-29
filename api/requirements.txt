@@ -13,3 +13,7 @@ pydub==0.25.1
 pytest==7.4.3
 pandas>=2.0.0,<2.1.0
 # basic-pitch==0.2.5  # Disabled due to TensorFlow ARM64 compatibility issues
+piano-transcription-inference==0.0.2
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
