@@ -1,0 +1,530 @@
+"""Beat-wise expressive feature extraction for piano performances."""
+
+import os
+import logging
+from typing import List, Dict, Tuple, Optional, Any
+import numpy as np
+import librosa
+import soundfile as sf
+from scipy import signal, stats
+from pathlib import Path
+
+from .models import ScorePiece
+from .api.schemas import FeatureCurve, ExpressiveFeatures
+
+logger = logging.getLogger(__name__)
+
+# Analysis parameters
+DEFAULT_SR = 22050
+HOP_LENGTH = 512
+FRAME_TIME = HOP_LENGTH / DEFAULT_SR
+
+# Feature extraction parameters
+PEDAL_LOW_FREQ = 80.0  # Hz, for pedal detection
+BALANCE_SPLIT_FREQ = 262.0  # Middle C, for hand balance
+TEMPO_MEDIAN_FILTER_SIZE = 5  # beats, for tempo smoothing
+
+
+def build_beat_grid(musicxml_path: str) -> Dict[str, List[float]]:
+    """
+    Build normalized beat grid from MusicXML file.
+    
+    Args:
+        musicxml_path: Path to MusicXML file
+        
+    Returns:
+        Dictionary with 'beats' (normalized positions) and 'nominal_durations' (in seconds)
+    """
+    try:
+        # Try to use music21 if available
+        import music21
+        
+        # Load the score
+        score = music21.converter.parse(musicxml_path)
+        
+        # Get tempo marking (default to 120 BPM if not found)
+        tempo_bpm = 120.0
+        for element in score.flatten():
+            if isinstance(element, music21.tempo.TempoIndication):
+                if hasattr(element, 'number'):
+                    tempo_bpm = float(element.number)
+                break
+        
+        # Calculate beat duration in seconds
+        beat_duration = 60.0 / tempo_bpm
+        
+        # Extract beat positions from measures
+        beats = []
+        nominal_durations = []
+        
+        current_time = 0.0
+        for measure in score.parts[0].getElementsByClass(music21.stream.Measure):
+            # Get time signature for this measure
+            ts = measure.timeSignature or music21.meter.TimeSignature('4/4')
+            beats_per_measure = ts.numerator
+            
+            # Add beats for this measure
+            for beat_num in range(beats_per_measure):
+                beats.append(current_time + beat_num * beat_duration)
+                nominal_durations.append(beat_duration)
+            
+            # Move to next measure
+            current_time += beats_per_measure * beat_duration
+        
+        # Normalize beat positions to [0, 1] range
+        if beats:
+            max_time = max(beats)
+            normalized_beats = [b / max_time for b in beats]
+        else:
+            # Fallback: create a simple 4/4 grid
+            normalized_beats = [0.0, 0.25, 0.5, 0.75, 1.0]
+            nominal_durations = [beat_duration] * 5
+        
+        logger.info(f"Built beat grid with {len(normalized_beats)} beats at {tempo_bpm} BPM")
+        
+        return {
+            "beats": normalized_beats,
+            "nominal_durations": nominal_durations
+        }
+        
+    except ImportError:
+        logger.warning("music21 not available, using fallback beat grid")
+        # Fallback: assume 4/4 time at 120 BPM
+        beat_duration = 0.5  # 120 BPM = 0.5s per beat
+        return {
+            "beats": [0.0, 0.25, 0.5, 0.75, 1.0],
+            "nominal_durations": [beat_duration] * 5
+        }
+    except Exception as e:
+        logger.error(f"Failed to parse MusicXML {musicxml_path}: {e}")
+        # Fallback: simple grid
+        return {
+            "beats": [0.0, 0.25, 0.5, 0.75, 1.0],
+            "nominal_durations": [0.5] * 5
+        }
+
+
+def extract_loudness(audio_path: str, sr: int, beats: List[float]) -> FeatureCurve:
+    """
+    Extract beat-wise loudness (RMS) features.
+    
+    Args:
+        audio_path: Path to audio file
+        sr: Sample rate
+        beats: Normalized beat positions [0, 1]
+        
+    Returns:
+        FeatureCurve with loudness values per beat
+    """
+    try:
+        # Load audio
+        y, _ = librosa.load(audio_path, sr=sr, mono=True)
+        duration = len(y) / sr
+        
+        # Compute RMS with frame-based analysis
+        rms = librosa.feature.rms(y=y, hop_length=HOP_LENGTH)[0]
+        frame_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=HOP_LENGTH)
+        
+        # Convert normalized beats to absolute time
+        beat_times = [b * duration for b in beats]
+        
+        # Aggregate RMS per beat interval
+        loudness_values = []
+        for i, beat_time in enumerate(beat_times):
+            if i < len(beat_times) - 1:
+                # Get frames within this beat interval
+                next_beat_time = beat_times[i + 1]
+                mask = (frame_times >= beat_time) & (frame_times < next_beat_time)
+            else:
+                # Last beat: from current to end
+                mask = frame_times >= beat_time
+            
+            if np.any(mask):
+                # Use RMS of RMS values (energy-based aggregation)
+                beat_rms = np.sqrt(np.mean(rms[mask] ** 2))
+            else:
+                # No frames in this interval
+                beat_rms = 0.0
+            
+            loudness_values.append(float(beat_rms))
+        
+        return FeatureCurve(beats=beats, values=loudness_values)
+        
+    except Exception as e:
+        logger.error(f"Failed to extract loudness from {audio_path}: {e}")
+        # Return zero loudness
+        return FeatureCurve(beats=beats, values=[0.0] * len(beats))
+
+
+def extract_tempo(alignment: List[Tuple[Any, float]], beats: List[float]) -> FeatureCurve:
+    """
+    Extract beat-wise tempo from aligned note onsets.
+    
+    Args:
+        alignment: List of (note_id, onset_time_seconds) tuples
+        beats: Normalized beat positions [0, 1]
+        
+    Returns:
+        FeatureCurve with tempo (BPM) values per beat
+    """
+    try:
+        if not alignment or len(alignment) < 2:
+            # No alignment data: return constant 120 BPM
+            return FeatureCurve(beats=beats, values=[120.0] * len(beats))
+        
+        # Extract onset times and sort
+        onset_times = sorted([onset for _, onset in alignment])
+        
+        # Compute inter-onset intervals (IOIs)
+        iois = np.diff(onset_times)
+        ioi_times = onset_times[1:]  # Time points for each IOI
+        
+        # Convert IOIs to instantaneous tempo (BPM)
+        # Assume each IOI represents one beat (this is an approximation)
+        instant_tempos = 60.0 / np.maximum(iois, 0.01)  # Avoid division by zero
+        
+        # Determine duration from alignment
+        if onset_times:
+            duration = max(onset_times[-1], 1.0)  # At least 1 second
+        else:
+            duration = 1.0
+        
+        # Convert normalized beats to absolute time
+        beat_times = [b * duration for b in beats]
+        
+        # Interpolate tempo values to beat grid
+        tempo_values = []
+        for beat_time in beat_times:
+            if len(ioi_times) > 0:
+                # Find nearest tempo measurement
+                idx = np.argmin(np.abs(np.array(ioi_times) - beat_time))
+                tempo_values.append(float(instant_tempos[idx]))
+            else:
+                tempo_values.append(120.0)
+        
+        # Apply median filter for stability
+        if len(tempo_values) >= TEMPO_MEDIAN_FILTER_SIZE:
+            tempo_values = signal.medfilt(tempo_values, TEMPO_MEDIAN_FILTER_SIZE).tolist()
+        
+        return FeatureCurve(beats=beats, values=tempo_values)
+        
+    except Exception as e:
+        logger.error(f"Failed to extract tempo from alignment: {e}")
+        # Return constant tempo
+        return FeatureCurve(beats=beats, values=[120.0] * len(beats))
+
+
+def extract_articulation(
+    alignment_with_durations: List[Tuple[Any, float, float]], 
+    nominal_durations: List[float], 
+    beats: List[float]
+) -> FeatureCurve:
+    """
+    Extract beat-wise articulation (duration ratio) features.
+    
+    Args:
+        alignment_with_durations: List of (note_id, onset_s, duration_s) tuples
+        nominal_durations: Expected durations per beat (seconds)
+        beats: Normalized beat positions [0, 1]
+        
+    Returns:
+        FeatureCurve with articulation ratio values per beat
+    """
+    try:
+        if not alignment_with_durations:
+            # No alignment data: return neutral articulation (1.0)
+            return FeatureCurve(beats=beats, values=[1.0] * len(beats))
+        
+        # Determine duration from alignment
+        onset_times = [onset for _, onset, _ in alignment_with_durations]
+        if onset_times:
+            duration = max(onset_times) + 1.0  # Add buffer
+        else:
+            duration = 1.0
+        
+        # Convert normalized beats to absolute time
+        beat_times = [b * duration for b in beats]
+        
+        # Compute articulation ratios per beat
+        articulation_values = []
+        
+        for i, beat_time in enumerate(beat_times):
+            if i < len(beat_times) - 1:
+                next_beat_time = beat_times[i + 1]
+            else:
+                # Last beat: use nominal duration
+                next_beat_time = beat_time + (nominal_durations[i] if i < len(nominal_durations) else 0.5)
+            
+            # Find notes that start within this beat interval
+            beat_notes = []
+            for note_id, onset, dur in alignment_with_durations:
+                if beat_time <= onset < next_beat_time:
+                    beat_notes.append(dur)
+            
+            if beat_notes:
+                # Compute average played duration
+                avg_played_duration = np.mean(beat_notes)
+                # Get nominal duration for this beat
+                nominal_dur = nominal_durations[i] if i < len(nominal_durations) else 0.5
+                # Compute ratio
+                ratio = avg_played_duration / max(nominal_dur, 0.01)  # Avoid division by zero
+                articulation_values.append(float(ratio))
+            else:
+                # No notes in this beat: neutral articulation
+                articulation_values.append(1.0)
+        
+        return FeatureCurve(beats=beats, values=articulation_values)
+        
+    except Exception as e:
+        logger.error(f"Failed to extract articulation: {e}")
+        # Return neutral articulation
+        return FeatureCurve(beats=beats, values=[1.0] * len(beats))
+
+
+def extract_pedal(audio_path: str, sr: int, beats: List[float]) -> FeatureCurve:
+    """
+    Extract beat-wise pedal usage proxy from audio.
+    
+    Args:
+        audio_path: Path to audio file
+        sr: Sample rate
+        beats: Normalized beat positions [0, 1]
+        
+    Returns:
+        FeatureCurve with pedal usage values (0-1) per beat
+    """
+    try:
+        # Load audio
+        y, _ = librosa.load(audio_path, sr=sr, mono=True)
+        duration = len(y) / sr
+        
+        # Compute spectral features for pedal detection
+        # Method: Low-frequency energy + spectral flux tail
+        
+        # 1. Low-frequency energy (pedal resonance)
+        stft = librosa.stft(y, hop_length=HOP_LENGTH)
+        freqs = librosa.fft_frequencies(sr=sr, n_fft=stft.shape[0] * 2 - 1)
+        
+        # Focus on low frequencies (below PEDAL_LOW_FREQ)
+        low_freq_mask = freqs <= PEDAL_LOW_FREQ
+        low_freq_energy = np.sum(np.abs(stft[low_freq_mask, :]), axis=0)
+        
+        # 2. Spectral flux (rate of spectral change)
+        mag = np.abs(stft)
+        spectral_flux = np.sum(np.diff(mag, axis=1) * (np.diff(mag, axis=1) > 0), axis=0)
+        spectral_flux = np.pad(spectral_flux, (1, 0), mode='edge')
+        
+        # 3. Combine features (weighted sum)
+        pedal_signal = 0.7 * low_freq_energy + 0.3 * spectral_flux
+        
+        # Normalize to [0, 1]
+        if np.max(pedal_signal) > 0:
+            pedal_signal = pedal_signal / np.max(pedal_signal)
+        
+        # Frame times
+        frame_times = librosa.frames_to_time(np.arange(len(pedal_signal)), sr=sr, hop_length=HOP_LENGTH)
+        
+        # Convert normalized beats to absolute time
+        beat_times = [b * duration for b in beats]
+        
+        # Aggregate pedal signal per beat
+        pedal_values = []
+        for i, beat_time in enumerate(beat_times):
+            if i < len(beat_times) - 1:
+                next_beat_time = beat_times[i + 1]
+                mask = (frame_times >= beat_time) & (frame_times < next_beat_time)
+            else:
+                mask = frame_times >= beat_time
+            
+            if np.any(mask):
+                # Use mean pedal signal in this beat
+                beat_pedal = np.mean(pedal_signal[mask])
+            else:
+                beat_pedal = 0.0
+            
+            pedal_values.append(float(beat_pedal))
+        
+        return FeatureCurve(beats=beats, values=pedal_values)
+        
+    except Exception as e:
+        logger.error(f"Failed to extract pedal from {audio_path}: {e}")
+        # Return zero pedal usage
+        return FeatureCurve(beats=beats, values=[0.0] * len(beats))
+
+
+def extract_balance(audio_path: str, sr: int, beats: List[float]) -> FeatureCurve:
+    """
+    Extract beat-wise left-right hand balance from audio.
+    
+    Args:
+        audio_path: Path to audio file
+        sr: Sample rate
+        beats: Normalized beat positions [0, 1]
+        
+    Returns:
+        FeatureCurve with balance values (0=left hand, 1=right hand) per beat
+    """
+    try:
+        # Load audio
+        y, _ = librosa.load(audio_path, sr=sr, mono=True)
+        duration = len(y) / sr
+        
+        # Use constant-Q transform for better frequency resolution
+        cqt = np.abs(librosa.cqt(y, sr=sr, hop_length=HOP_LENGTH))
+        cqt_freqs = librosa.cqt_frequencies(cqt.shape[0], fmin=librosa.note_to_hz('C1'))
+        
+        # Split into left hand (low) and right hand (high) registers
+        split_idx = np.argmin(np.abs(cqt_freqs - BALANCE_SPLIT_FREQ))
+        
+        # Left hand: frequencies below split
+        left_hand_energy = np.sum(cqt[:split_idx, :], axis=0)
+        
+        # Right hand: frequencies above split
+        right_hand_energy = np.sum(cqt[split_idx:, :], axis=0)
+        
+        # Compute balance ratio: RH / (LH + RH)
+        total_energy = left_hand_energy + right_hand_energy
+        balance_ratio = np.divide(
+            right_hand_energy, 
+            total_energy, 
+            out=np.zeros_like(right_hand_energy), 
+            where=total_energy > 0
+        )
+        
+        # Frame times
+        frame_times = librosa.frames_to_time(np.arange(len(balance_ratio)), sr=sr, hop_length=HOP_LENGTH)
+        
+        # Convert normalized beats to absolute time
+        beat_times = [b * duration for b in beats]
+        
+        # Aggregate balance per beat
+        balance_values = []
+        for i, beat_time in enumerate(beat_times):
+            if i < len(beat_times) - 1:
+                next_beat_time = beat_times[i + 1]
+                mask = (frame_times >= beat_time) & (frame_times < next_beat_time)
+            else:
+                mask = frame_times >= beat_time
+            
+            if np.any(mask):
+                # Use mean balance in this beat
+                beat_balance = np.mean(balance_ratio[mask])
+            else:
+                beat_balance = 0.5  # Neutral balance
+            
+            balance_values.append(float(beat_balance))
+        
+        return FeatureCurve(beats=beats, values=balance_values)
+        
+    except Exception as e:
+        logger.error(f"Failed to extract balance from {audio_path}: {e}")
+        # Return neutral balance
+        return FeatureCurve(beats=beats, values=[0.5] * len(beats))
+
+
+def compute_expressive_features(
+    score: ScorePiece, 
+    perf_audio_path: str, 
+    alignment: Optional[Dict[str, Any]] = None
+) -> ExpressiveFeatures:
+    """
+    Compute all expressive features for a performance aligned to a score.
+    
+    Args:
+        score: ScorePiece model with musicxml_path and beats_json
+        perf_audio_path: Path to performance audio file
+        alignment: Optional alignment data from note matching
+        
+    Returns:
+        ExpressiveFeatures with all feature curves
+    """
+    try:
+        logger.info(f"Computing expressive features for {perf_audio_path}")
+        
+        # 1. Build beat grid from score
+        if score.beats_json and isinstance(score.beats_json, list):
+            # Use pre-computed beat grid from score
+            beats = score.beats_json
+            nominal_durations = [0.5] * len(beats)  # Default duration
+        else:
+            # Build beat grid from MusicXML
+            beat_grid = build_beat_grid(score.musicxml_path)
+            beats = beat_grid["beats"]
+            nominal_durations = beat_grid["nominal_durations"]
+        
+        # Ensure we have a valid beat grid
+        if not beats:
+            beats = [0.0, 0.25, 0.5, 0.75, 1.0]
+            nominal_durations = [0.5] * 5
+        
+        logger.info(f"Using beat grid with {len(beats)} beats")
+        
+        # 2. Extract audio-based features
+        loudness = extract_loudness(perf_audio_path, DEFAULT_SR, beats)
+        pedal = extract_pedal(perf_audio_path, DEFAULT_SR, beats)
+        balance = extract_balance(perf_audio_path, DEFAULT_SR, beats)
+        
+        # 3. Extract alignment-based features
+        if alignment and "note_onsets" in alignment:
+            # Use provided alignment data
+            note_onsets = alignment["note_onsets"]  # List of (note_id, onset_time)
+            tempo = extract_tempo(note_onsets, beats)
+            
+            # Check for duration data
+            if "note_durations" in alignment:
+                note_durations = alignment["note_durations"]  # List of (note_id, onset, duration)
+                articulation = extract_articulation(note_durations, nominal_durations, beats)
+            else:
+                # No duration data: neutral articulation
+                articulation = FeatureCurve(beats=beats, values=[1.0] * len(beats))
+        else:
+            # No alignment: use audio-only approximations
+            logger.warning("No alignment data provided, using audio-only tempo estimation")
+            
+            # Audio-only tempo estimation using beat tracking
+            try:
+                y, _ = librosa.load(perf_audio_path, sr=DEFAULT_SR, mono=True)
+                tempo_estimate, _ = librosa.beat.beat_track(y=y, sr=DEFAULT_SR)
+                tempo_values = [float(tempo_estimate)] * len(beats)
+            except Exception as e:
+                logger.error(f"Failed audio-only tempo estimation: {e}")
+                tempo_values = [120.0] * len(beats)
+            
+            tempo = FeatureCurve(beats=beats, values=tempo_values)
+            articulation = FeatureCurve(beats=beats, values=[1.0] * len(beats))
+        
+        # 4. Validate all curves have same length
+        expected_length = len(beats)
+        for feature_name, curve in [
+            ("loudness", loudness), ("tempo", tempo), 
+            ("articulation", articulation), ("pedal", pedal), ("balance", balance)
+        ]:
+            if len(curve.values) != expected_length:
+                logger.warning(f"{feature_name} curve length mismatch: {len(curve.values)} != {expected_length}")
+                # Pad or truncate to match
+                if len(curve.values) < expected_length:
+                    curve.values.extend([curve.values[-1] if curve.values else 0.0] * (expected_length - len(curve.values)))
+                else:
+                    curve.values = curve.values[:expected_length]
+        
+        logger.info("Successfully computed all expressive features")
+        
+        return ExpressiveFeatures(
+            tempo=tempo,
+            loudness=loudness,
+            articulation=articulation,
+            pedal=pedal,
+            balance=balance
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to compute expressive features: {e}")
+        # Return empty/neutral features
+        fallback_beats = [0.0, 0.25, 0.5, 0.75, 1.0]
+        return ExpressiveFeatures(
+            tempo=FeatureCurve(beats=fallback_beats, values=[120.0] * 5),
+            loudness=FeatureCurve(beats=fallback_beats, values=[0.0] * 5),
+            articulation=FeatureCurve(beats=fallback_beats, values=[1.0] * 5),
+            pedal=FeatureCurve(beats=fallback_beats, values=[0.0] * 5),
+            balance=FeatureCurve(beats=fallback_beats, values=[0.5] * 5)
+        )

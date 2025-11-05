@@ -4,14 +4,14 @@ A web application that analyzes piano performances by comparing user recordings 
 
 ## Features
 
-- 🎵 **Audio Analysis**: Compare user performance against reference recordings
-- 📊 **Performance Metrics**: Tempo, pitch accuracy, dynamics, and overall scoring
-- 🎯 **Issue Detection**: Identify specific problems with timestamps and explanations
-- 📈 **Visual Charts**: Real-time analysis with tempo curves, chroma distance, and RMS dynamics
-- 🎧 **Audio Playback**: Integrated player with clickable issue navigation
-- 📱 **Modern UI**: Drag-and-drop file uploads, responsive design
-- 🔗 **YouTube Support**: Direct analysis from YouTube URLs
-- 🤖 **Optional MIDI Analysis**: Basic Pitch note transcription (when enabled)
+-  **Audio Analysis**: Compare user performance against reference recordings
+-  **Performance Metrics**: Tempo, pitch accuracy, dynamics, and overall scoring
+-  **Issue Detection**: Identify specific problems with timestamps and explanations
+-  **Visual Charts**: Real-time analysis with tempo curves, chroma distance, and RMS dynamics
+-  **Audio Playback**: Integrated player with clickable issue navigation
+-  **Modern UI**: Drag-and-drop file uploads, responsive design
+-  **YouTube Support**: Direct analysis from YouTube URLs
+-  **Optional MIDI Analysis**: Basic Pitch note transcription (when enabled)
 
 ## Quick Start
 

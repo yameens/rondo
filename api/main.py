@@ -18,7 +18,9 @@ import time
 import glob
 
 # Add project root to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+project_root = os.path.dirname(os.path.dirname(__file__))
+sys.path.insert(0, project_root)
+print(f"Added to Python path: {project_root}")  # Debug print
 
 # Import our analysis modules
 try:
@@ -244,11 +246,37 @@ app.add_middleware(
 # Mount static files for audio preview
 app.mount("/static", StaticFiles(directory="/tmp"), name="static")
 
-# Startup event to clean old files
+# Database setup
+try:
+    import sys
+    backend_path = os.path.join(project_root, 'backend')
+    if backend_path not in sys.path:
+        sys.path.insert(0, backend_path)
+    
+    from app.database import create_tables, Base, engine
+    DATABASE_AVAILABLE = True
+    logger.info("Database modules imported successfully")
+except ImportError as e:
+    DATABASE_AVAILABLE = False
+    logger.warning(f"Database not available: {e}")
+
+# Startup event to clean old files and initialize database
 @app.on_event("startup")
 async def startup_event():
-    """Run cleanup on startup."""
+    """Run cleanup and database initialization on startup."""
     cleanup_old_audio_files()
+    
+    # Initialize database if available
+    if DATABASE_AVAILABLE:
+        try:
+            logger.info("Initializing database tables...")
+            create_tables()
+            logger.info("Database tables created successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize database: {e}")
+            # Don't fail startup if database initialization fails
+    else:
+        logger.info("Running without database (legacy mode)")
 
 # Job storage (in production, use Redis or database)
 job_storage: Dict[str, Dict[str, Any]] = {}
