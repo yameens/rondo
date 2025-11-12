@@ -2,6 +2,12 @@
 
 A web application that analyzes piano performances by comparing user recordings against reference audio. Uses audio signal processing and machine learning to provide feedback on tempo, pitch accuracy, dynamics, and timing.
 
+## 🚀 Quick Deploy to Vercel
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/bruceruan07/rondo.audiotoaudio)
+
+For detailed deployment instructions, see [VERCEL_DEPLOYMENT.md](./VERCEL_DEPLOYMENT.md).
+
 ## Features
 
 -  **Audio Analysis**: Compare user performance against reference recordings

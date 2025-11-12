@@ -47,8 +47,8 @@ async def startup_event():
         create_tables()
         logger.info("Database tables created successfully")
     except Exception as e:
-        logger.error(f"Failed to create database tables: {e}")
-        raise
+        logger.warning(f"Database initialization failed (may be expected in serverless): {e}")
+        # Don't raise in serverless environment - tables may be created elsewhere
 
 
 @app.get("/")

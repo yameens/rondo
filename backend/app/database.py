@@ -9,7 +9,11 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     """Application settings."""
-    database_url: str = "sqlite:///./piano_analysis.db"
+    # Use PostgreSQL for production (Vercel), SQLite for local development
+    database_url: str = os.getenv(
+        "DATABASE_URL", 
+        "sqlite:///./piano_analysis.db"
+    )
     
     class Config:
         env_file = ".env"
