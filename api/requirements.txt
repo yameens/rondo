@@ -1,24 +1,36 @@
-# Core FastAPI dependencies (Vercel compatible)
+# Core FastAPI dependencies
 fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
 pydantic==2.5.0
 pydantic-settings==2.1.0
-python-multipart==0.0.6
+
+# Audio processing dependencies
+librosa==0.10.1
+soundfile==0.12.1
+numpy==1.24.3
+scipy==1.11.4
+
+# Music analysis dependencies
+music21==9.1.0
 
 # Database dependencies
 sqlalchemy==2.0.44
 psycopg2-binary==2.9.9
 
-# Lightweight audio processing (Vercel compatible)
-numpy==1.24.3
+# Async task processing
+celery[redis]==5.3.4
+redis==5.0.1
 
 # Additional utilities
 python-dotenv==1.0.0
 requests==2.31.0
 
-# Note: Heavy audio processing libraries (librosa, scipy, music21) 
-# are commented out for Vercel compatibility. 
-# Uncomment for local development:
-# librosa==0.10.1
-# soundfile==0.12.1  
-# scipy==1.11.4
-# music21==9.1.0
+# AI/ML dependencies for music analysis
+scikit-learn==1.3.2
+matplotlib==3.8.2
+seaborn==0.13.0
+
+# Audio format support
+pydub==0.25.1
+mutagen==1.47.0
