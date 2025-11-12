@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .models import ScorePiece
 from .api.schemas import FeatureCurve, ExpressiveFeatures
+from .onset_detection import OnsetFrameDetector, detect_onsets_and_frames
 
 logger = logging.getLogger(__name__)
 
@@ -528,3 +529,260 @@ def compute_expressive_features(
             pedal=FeatureCurve(beats=fallback_beats, values=[0.0] * 5),
             balance=FeatureCurve(beats=fallback_beats, values=[0.5] * 5)
         )
+
+
+def analyze_audio_pair(student_path: str, reference_path: str = None) -> Dict[str, Any]:
+    """
+    Comprehensive analysis of student performance with optional reference comparison.
+    Uses professional onset detection and expressive feature analysis.
+    
+    Args:
+        student_path: Path to student audio file
+        reference_path: Optional path to reference audio file
+        
+    Returns:
+        Dictionary with comprehensive analysis results
+    """
+    logger.info(f"Starting comprehensive audio analysis for {student_path}")
+    
+    try:
+        # Analyze student performance with onset detection
+        student_analysis = detect_onsets_and_frames(student_path)
+        logger.info(f"Student analysis: {len(student_analysis['onsets'])} onsets detected")
+        
+        results = {
+            'student': {
+                'audio_path': student_path,
+                'onset_analysis': student_analysis,
+                'tempo_bpm': student_analysis['tempo'],
+                'num_onsets': len(student_analysis['onsets']),
+                'num_notes': len(student_analysis['note_frames']),
+                'duration': len(student_analysis['onsets']) * 0.5 if student_analysis['onsets'] else 0
+            }
+        }
+        
+        # Analyze reference if provided
+        if reference_path:
+            reference_analysis = detect_onsets_and_frames(reference_path)
+            logger.info(f"Reference analysis: {len(reference_analysis['onsets'])} onsets detected")
+            
+            results['reference'] = {
+                'audio_path': reference_path,
+                'onset_analysis': reference_analysis,
+                'tempo_bpm': reference_analysis['tempo'],
+                'num_onsets': len(reference_analysis['onsets']),
+                'num_notes': len(reference_analysis['note_frames'])
+            }
+            
+            # Compute comparison metrics
+            results['comparison'] = compute_performance_comparison(
+                student_analysis, reference_analysis
+            )
+        
+        # Add overall assessment
+        results['assessment'] = generate_performance_assessment(student_analysis, results.get('comparison'))
+        
+        logger.info("Comprehensive analysis completed successfully")
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error in comprehensive analysis: {e}")
+        raise
+
+
+def compute_performance_comparison(student_analysis: Dict, reference_analysis: Dict) -> Dict[str, Any]:
+    """
+    Compare student and reference performances.
+    
+    Args:
+        student_analysis: Student onset analysis results
+        reference_analysis: Reference onset analysis results
+        
+    Returns:
+        Dictionary with comparison metrics
+    """
+    try:
+        comparison = {}
+        
+        # Tempo comparison
+        student_tempo = student_analysis['tempo']
+        reference_tempo = reference_analysis['tempo']
+        tempo_diff = abs(student_tempo - reference_tempo)
+        tempo_ratio = student_tempo / reference_tempo if reference_tempo > 0 else 1.0
+        
+        comparison['tempo'] = {
+            'student_bpm': student_tempo,
+            'reference_bpm': reference_tempo,
+            'difference_bpm': tempo_diff,
+            'ratio': tempo_ratio,
+            'similarity_score': max(0, 100 - (tempo_diff / reference_tempo * 100)) if reference_tempo > 0 else 0
+        }
+        
+        # Onset timing comparison
+        student_onsets = np.array(student_analysis['onsets'])
+        reference_onsets = np.array(reference_analysis['onsets'])
+        
+        if len(student_onsets) > 0 and len(reference_onsets) > 0:
+            # Align onsets using DTW-like approach
+            onset_alignment = align_onset_sequences(student_onsets, reference_onsets)
+            comparison['timing'] = onset_alignment
+        
+        # Note count comparison
+        student_notes = len(student_analysis['note_frames'])
+        reference_notes = len(reference_analysis['note_frames'])
+        
+        comparison['note_count'] = {
+            'student': student_notes,
+            'reference': reference_notes,
+            'difference': student_notes - reference_notes,
+            'completeness_score': min(100, (student_notes / reference_notes * 100)) if reference_notes > 0 else 0
+        }
+        
+        return comparison
+        
+    except Exception as e:
+        logger.error(f"Error computing performance comparison: {e}")
+        return {}
+
+
+def align_onset_sequences(student_onsets: np.ndarray, reference_onsets: np.ndarray) -> Dict[str, Any]:
+    """
+    Align two onset sequences and compute timing accuracy metrics.
+    
+    Args:
+        student_onsets: Array of student onset times
+        reference_onsets: Array of reference onset times
+        
+    Returns:
+        Dictionary with alignment and timing metrics
+    """
+    try:
+        from scipy.spatial.distance import cdist
+        
+        # Compute pairwise distances
+        distances = cdist(student_onsets.reshape(-1, 1), reference_onsets.reshape(-1, 1))
+        
+        # Find best alignment using minimum distance
+        min_len = min(len(student_onsets), len(reference_onsets))
+        aligned_pairs = []
+        timing_errors = []
+        
+        for i in range(min_len):
+            if i < len(student_onsets) and i < len(reference_onsets):
+                student_time = student_onsets[i]
+                reference_time = reference_onsets[i]
+                error = abs(student_time - reference_time)
+                
+                aligned_pairs.append((student_time, reference_time))
+                timing_errors.append(error)
+        
+        if timing_errors:
+            mean_error = np.mean(timing_errors)
+            std_error = np.std(timing_errors)
+            max_error = np.max(timing_errors)
+            
+            # Timing accuracy score (higher is better)
+            accuracy_score = max(0, 100 - (mean_error * 100))  # Assume 1 second error = 100 point penalty
+            
+            return {
+                'aligned_pairs': aligned_pairs,
+                'mean_timing_error': mean_error,
+                'std_timing_error': std_error,
+                'max_timing_error': max_error,
+                'accuracy_score': accuracy_score,
+                'num_aligned': len(aligned_pairs)
+            }
+        
+        return {'error': 'No valid alignments found'}
+        
+    except Exception as e:
+        logger.error(f"Error aligning onset sequences: {e}")
+        return {'error': str(e)}
+
+
+def generate_performance_assessment(student_analysis: Dict, comparison: Dict = None) -> Dict[str, Any]:
+    """
+    Generate an overall assessment of the performance.
+    
+    Args:
+        student_analysis: Student onset analysis results
+        comparison: Optional comparison with reference
+        
+    Returns:
+        Dictionary with assessment and feedback
+    """
+    try:
+        assessment = {
+            'overall_score': 0,
+            'feedback': [],
+            'strengths': [],
+            'areas_for_improvement': []
+        }
+        
+        # Tempo assessment
+        tempo = student_analysis['tempo']
+        if 60 <= tempo <= 200:  # Reasonable piano tempo range
+            assessment['strengths'].append(f"Good tempo control ({tempo:.1f} BPM)")
+            tempo_score = 85
+        elif tempo < 60:
+            assessment['areas_for_improvement'].append("Tempo is quite slow - try to maintain a steadier pace")
+            tempo_score = 60
+        else:
+            assessment['areas_for_improvement'].append("Tempo is very fast - focus on control and accuracy")
+            tempo_score = 70
+        
+        # Onset detection quality
+        num_onsets = len(student_analysis['onsets'])
+        if num_onsets > 10:
+            assessment['strengths'].append(f"Good note articulation - {num_onsets} clear onsets detected")
+            onset_score = 80
+        elif num_onsets > 5:
+            assessment['feedback'].append("Moderate note clarity - some notes may need clearer articulation")
+            onset_score = 70
+        else:
+            assessment['areas_for_improvement'].append("Few clear onsets detected - focus on note clarity")
+            onset_score = 50
+        
+        # Comparison-based assessment
+        comparison_score = 75  # Default
+        if comparison:
+            if 'tempo' in comparison:
+                tempo_similarity = comparison['tempo'].get('similarity_score', 0)
+                if tempo_similarity > 90:
+                    assessment['strengths'].append("Excellent tempo matching with reference")
+                    comparison_score += 10
+                elif tempo_similarity > 70:
+                    assessment['feedback'].append("Good tempo similarity to reference")
+                else:
+                    assessment['areas_for_improvement'].append("Work on matching the reference tempo")
+                    comparison_score -= 10
+            
+            if 'timing' in comparison:
+                timing_accuracy = comparison['timing'].get('accuracy_score', 0)
+                if timing_accuracy > 85:
+                    assessment['strengths'].append("Excellent timing accuracy")
+                elif timing_accuracy > 70:
+                    assessment['feedback'].append("Good timing overall")
+                else:
+                    assessment['areas_for_improvement'].append("Focus on timing precision")
+        
+        # Calculate overall score
+        assessment['overall_score'] = np.mean([tempo_score, onset_score, comparison_score])
+        
+        # Add general feedback
+        if assessment['overall_score'] > 85:
+            assessment['feedback'].append("Excellent performance! Keep up the great work.")
+        elif assessment['overall_score'] > 70:
+            assessment['feedback'].append("Good performance with room for refinement.")
+        else:
+            assessment['feedback'].append("Keep practicing - focus on the areas for improvement.")
+        
+        return assessment
+        
+    except Exception as e:
+        logger.error(f"Error generating assessment: {e}")
+        return {
+            'overall_score': 50,
+            'feedback': ['Unable to generate detailed assessment'],
+            'error': str(e)
+        }
