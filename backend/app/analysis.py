@@ -13,6 +13,19 @@ from .models import ScorePiece
 from .api.schemas import FeatureCurve, ExpressiveFeatures
 from .onset_detection import OnsetFrameDetector, detect_onsets_and_frames
 
+# Import ByteDance piano transcription for superior accuracy
+try:
+    from .piano_transcription import (
+        analyze_piano_performance,
+        transcribe_piano_to_notes,
+        PianoTranscriptionError
+    )
+    BYTEDANCE_AVAILABLE = True
+    logger.info("ByteDance Piano Transcription available for analysis")
+except ImportError as e:
+    BYTEDANCE_AVAILABLE = False
+    logger.warning(f"ByteDance not available, using fallback methods: {e}")
+
 logger = logging.getLogger(__name__)
 
 # Analysis parameters
@@ -534,37 +547,85 @@ def compute_expressive_features(
 def analyze_audio_pair(student_path: str, reference_path: str = None) -> Dict[str, Any]:
     """
     Comprehensive analysis of student performance with optional reference comparison.
-    Uses professional onset detection and expressive feature analysis.
-    
+    Uses ByteDance Piano Transcription for superior chord detection and timing accuracy.
+
     Args:
         student_path: Path to student audio file
         reference_path: Optional path to reference audio file
-        
+
     Returns:
         Dictionary with comprehensive analysis results
     """
     logger.info(f"Starting comprehensive audio analysis for {student_path}")
-    
+
     try:
-        # Analyze student performance with onset detection
-        student_analysis = detect_onsets_and_frames(student_path)
-        logger.info(f"Student analysis: {len(student_analysis['onsets'])} onsets detected")
+        # Analyze student performance with ByteDance (primary) or onset detection (fallback)
+        if BYTEDANCE_AVAILABLE:
+            try:
+                logger.info("Using ByteDance Piano Transcription for superior accuracy")
+                student_analysis = analyze_piano_performance(student_path)
+                
+                # Convert ByteDance format to expected format
+                student_analysis_converted = {
+                    'onsets': student_analysis['onsets'],
+                    'note_frames': [(note['onset_s'], note['offset_s']) for note in student_analysis['notes']],
+                    'tempo': student_analysis['tempo'],
+                    'beats': student_analysis['beats'],
+                    'notes': student_analysis['notes'],
+                    'analysis_method': 'bytedance_piano_transcription',
+                    'chord_analysis': student_analysis.get('chord_analysis', {}),
+                    'transcription_quality': student_analysis.get('transcription_quality', {})
+                }
+                
+            except Exception as e:
+                logger.warning(f"ByteDance failed for student: {e}, using fallback")
+                student_analysis_converted = detect_onsets_and_frames(student_path, method='librosa')
+        else:
+            logger.info("ByteDance not available, using multi-method onset detection")
+            student_analysis_converted = detect_onsets_and_frames(student_path, method='librosa')
         
+        logger.info(f"Student analysis: {len(student_analysis_converted['onsets'])} onsets detected using {student_analysis_converted.get('analysis_method', 'unknown')}")
+
         results = {
             'student': {
                 'audio_path': student_path,
-                'onset_analysis': student_analysis,
-                'tempo_bpm': student_analysis['tempo'],
-                'num_onsets': len(student_analysis['onsets']),
-                'num_notes': len(student_analysis['note_frames']),
-                'duration': len(student_analysis['onsets']) * 0.5 if student_analysis['onsets'] else 0
+                'onset_analysis': student_analysis_converted,
+                'tempo_bpm': student_analysis_converted['tempo'],
+                'num_onsets': len(student_analysis_converted['onsets']),
+                'num_notes': len(student_analysis_converted['note_frames']),
+                'duration': student_analysis_converted.get('duration', len(student_analysis_converted['onsets']) * 0.5 if student_analysis_converted['onsets'] else 0),
+                'analysis_method': student_analysis_converted.get('analysis_method', 'unknown'),
+                'chord_analysis': student_analysis_converted.get('chord_analysis', {}),
+                'transcription_quality': student_analysis_converted.get('transcription_quality', {})
             }
         }
         
         # Analyze reference if provided
         if reference_path:
-            reference_analysis = detect_onsets_and_frames(reference_path)
-            logger.info(f"Reference analysis: {len(reference_analysis['onsets'])} onsets detected")
+            if BYTEDANCE_AVAILABLE:
+                try:
+                    logger.info("Using ByteDance Piano Transcription for reference analysis")
+                    ref_analysis = analyze_piano_performance(reference_path)
+                    
+                    # Convert ByteDance format
+                    reference_analysis = {
+                        'onsets': ref_analysis['onsets'],
+                        'note_frames': [(note['onset_s'], note['offset_s']) for note in ref_analysis['notes']],
+                        'tempo': ref_analysis['tempo'],
+                        'beats': ref_analysis['beats'],
+                        'notes': ref_analysis['notes'],
+                        'analysis_method': 'bytedance_piano_transcription',
+                        'chord_analysis': ref_analysis.get('chord_analysis', {}),
+                        'transcription_quality': ref_analysis.get('transcription_quality', {})
+                    }
+                    
+                except Exception as e:
+                    logger.warning(f"ByteDance failed for reference: {e}, using fallback")
+                    reference_analysis = detect_onsets_and_frames(reference_path, method='librosa')
+            else:
+                reference_analysis = detect_onsets_and_frames(reference_path, method='librosa')
+                
+            logger.info(f"Reference analysis: {len(reference_analysis['onsets'])} onsets detected using {reference_analysis.get('analysis_method', 'unknown')}")
             
             results['reference'] = {
                 'audio_path': reference_path,

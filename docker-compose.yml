@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   db:
@@ -46,6 +44,9 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
+      # ByteDance Piano Transcription settings
+      - CUDA_VISIBLE_DEVICES=0
+      - TORCH_HOME=/app/.torch
     volumes:
       - ./backend:/app
       - ./api:/app/api

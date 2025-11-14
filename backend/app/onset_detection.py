@@ -1,6 +1,6 @@
 """
 Professional onset and frame detection for piano performance analysis.
-Replaces Basic Pitch with high-quality onset detection algorithms.
+Now uses ByteDance Piano Transcription as primary method with librosa fallback.
 """
 
 import numpy as np
@@ -10,6 +10,31 @@ from typing import List, Tuple, Dict, Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Try to import ByteDance Piano Transcription (primary method)
+try:
+    from .piano_transcription import (
+        analyze_piano_performance,
+        transcribe_piano_to_notes,
+        extract_onset_times,
+        extract_beat_times,
+        PianoTranscriptionError
+    )
+    BYTEDANCE_AVAILABLE = True
+    logger.info("ByteDance Piano Transcription available - using as primary method")
+except ImportError as e:
+    BYTEDANCE_AVAILABLE = False
+    logger.warning(f"ByteDance Piano Transcription not available: {e}")
+
+# Basic Pitch as fallback only
+try:
+    import basic_pitch
+    from basic_pitch.inference import predict
+    BASIC_PITCH_AVAILABLE = True
+    logger.info("Basic Pitch available as fallback")
+except ImportError:
+    BASIC_PITCH_AVAILABLE = False
+    logger.warning("Basic Pitch not available")
 
 class OnsetFrameDetector:
     """
@@ -477,28 +502,142 @@ class OnsetFrameDetector:
 
 def detect_onsets_and_frames(audio_path: str, 
                            sr: int = 22050,
-                           method: str = 'weighted') -> Dict:
+                           method: str = 'bytedance') -> Dict:
     """
-    Convenience function for onset and frame detection.
+    Professional onset and frame detection with ByteDance Piano Transcription.
     
     Args:
         audio_path: Path to audio file
-        sr: Sample rate
-        method: Detection method ('weighted', 'union', 'intersection')
+        sr: Sample rate (ignored for ByteDance, uses optimal 16kHz)
+        method: Detection method ('bytedance', 'librosa', 'basic_pitch')
         
     Returns:
         Analysis results dictionary
     """
-    # Load audio
-    audio, _ = librosa.load(audio_path, sr=sr)
+    logger.info(f"Starting onset detection for {audio_path} with method: {method}")
     
-    # Create detector
-    detector = OnsetFrameDetector(sr=sr)
+    # Method 1: ByteDance Piano Transcription (BEST - Primary choice)
+    if method == 'bytedance' and BYTEDANCE_AVAILABLE:
+        try:
+            logger.info("Using ByteDance Piano Transcription (superior chord detection)")
+            result = analyze_piano_performance(audio_path)
+            
+            # Convert to expected format
+            return {
+                'onsets': result['onsets'],
+                'note_frames': [(note['onset_s'], note['offset_s']) for note in result['notes']],
+                'tempo': result['tempo'],
+                'beats': result['beats'],
+                'notes': result['notes'],  # Full note information
+                'analysis_method': 'bytedance_piano_transcription',
+                'chord_analysis': result.get('chord_analysis', {}),
+                'transcription_quality': result.get('transcription_quality', {})
+            }
+            
+        except Exception as e:
+            logger.warning(f"ByteDance transcription failed: {e}, falling back to librosa")
+            method = 'librosa'  # Fallback
     
-    # Analyze
-    results = detector.analyze_performance(audio)
+    # Method 2: Multi-method librosa (GOOD - Reliable fallback)
+    if method == 'librosa' or (method == 'bytedance' and not BYTEDANCE_AVAILABLE):
+        try:
+            logger.info("Using multi-method librosa onset detection")
+            
+            # Load audio
+            audio, actual_sr = librosa.load(audio_path, sr=sr)
+            
+            # Create detector
+            detector = OnsetFrameDetector(sr=actual_sr)
+            
+            # Analyze with multiple methods
+            results = detector.analyze_performance(audio)
+            results['analysis_method'] = 'librosa_multi_method'
+            
+            return results
+            
+        except Exception as e:
+            logger.warning(f"Librosa detection failed: {e}, falling back to Basic Pitch")
+            method = 'basic_pitch'  # Final fallback
     
-    return results
+    # Method 3: Basic Pitch (LEGACY - Last resort only)
+    if method == 'basic_pitch' and BASIC_PITCH_AVAILABLE:
+        try:
+            logger.info("Using Basic Pitch (legacy fallback)")
+            
+            # Load audio for basic analysis
+            audio, actual_sr = librosa.load(audio_path, sr=sr)
+            
+            # Basic Pitch transcription
+            result = predict(audio_path)
+            
+            # Extract basic information
+            if len(result) >= 2:
+                midi_data, note_events = result[:2]
+                
+                # Convert to basic format
+                onsets = []
+                note_frames = []
+                
+                if hasattr(note_events, 'notes'):
+                    for note in note_events.notes:
+                        onsets.append(note.start)
+                        note_frames.append((note.start, note.end))
+                
+                # Estimate tempo from onsets
+                if len(onsets) > 1:
+                    intervals = np.diff(sorted(onsets))
+                    tempo = 60.0 / np.median(intervals) if len(intervals) > 0 else 120.0
+                else:
+                    tempo = 120.0
+                
+                return {
+                    'onsets': onsets,
+                    'note_frames': note_frames,
+                    'tempo': tempo,
+                    'beats': onsets,  # Approximate
+                    'analysis_method': 'basic_pitch_fallback'
+                }
+            
+        except Exception as e:
+            logger.warning(f"Basic Pitch failed: {e}, using minimal librosa")
+    
+    # Final fallback: Minimal librosa onset detection
+    logger.warning("All advanced methods failed, using basic librosa onset detection")
+    
+    try:
+        audio, actual_sr = librosa.load(audio_path, sr=sr)
+        
+        # Basic onset detection
+        onset_frames = librosa.onset.onset_detect(
+            y=audio, 
+            sr=actual_sr, 
+            hop_length=512,
+            units='time'
+        )
+        
+        # Basic tempo estimation
+        tempo, beats = librosa.beat.beat_track(y=audio, sr=actual_sr)
+        beat_times = librosa.frames_to_time(beats, sr=actual_sr, hop_length=512)
+        
+        return {
+            'onsets': onset_frames.tolist(),
+            'note_frames': [(onset, onset + 0.5) for onset in onset_frames],  # Assume 0.5s duration
+            'tempo': float(tempo),
+            'beats': beat_times.tolist(),
+            'analysis_method': 'librosa_basic_fallback'
+        }
+        
+    except Exception as e:
+        logger.error(f"All onset detection methods failed: {e}")
+        
+        # Return minimal valid result
+        return {
+            'onsets': [],
+            'note_frames': [],
+            'tempo': 120.0,
+            'beats': [0.0],
+            'analysis_method': 'failed_fallback'
+        }
 
 
 if __name__ == "__main__":
