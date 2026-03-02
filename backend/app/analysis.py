@@ -1,8 +1,10 @@
 """Beat-wise expressive feature extraction for piano performances."""
 
 import os
+import json
 import logging
 from typing import List, Dict, Tuple, Optional, Any
+from datetime import datetime
 import numpy as np
 import librosa
 import soundfile as sf
@@ -13,7 +15,61 @@ from .models import ScorePiece
 from .api.schemas import FeatureCurve, ExpressiveFeatures
 from .onset_detection import OnsetFrameDetector, detect_onsets_and_frames
 
+logger = logging.getLogger(__name__)
+
+
+def _export_analysis_result_to_json(result: Dict[str, Any], prefix: str = "analysis") -> Optional[str]:
+    """
+    Export analysis result dict to JSON file for debugging.
+    
+    Args:
+        result: The analysis result dictionary to export
+        prefix: Filename prefix (default: "analysis")
+        
+    Returns:
+        Path to exported file, or None if export failed
+    """
+    try:
+        # Create exports directory if it doesn't exist
+        exports_dir = Path(__file__).parent.parent / "exports"
+        exports_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate timestamped filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"{prefix}_{timestamp}.json"
+        filepath = exports_dir / filename
+        
+        # Convert numpy arrays to lists for JSON serialization
+        def convert_for_json(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, dict):
+                return {k: convert_for_json(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_for_json(item) for item in obj]
+            elif isinstance(obj, tuple):
+                return [convert_for_json(item) for item in obj]
+            return obj
+        
+        serializable_result = convert_for_json(result)
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(serializable_result, f, indent=2, default=str)
+        
+        logger.info(f"[DEBUG EXPORT] Analysis result exported to: {filepath}")
+        return str(filepath)
+        
+    except Exception as e:
+        logger.warning(f"[DEBUG EXPORT] Failed to export analysis result: {e}")
+        return None
+
 # Import ByteDance piano transcription for superior accuracy
+# This uses the piano-transcription-inference library from ByteDance
+# which provides better chord detection and timing accuracy than Basic Pitch
 try:
     from .piano_transcription import (
         analyze_piano_performance,
@@ -21,12 +77,12 @@ try:
         PianoTranscriptionError
     )
     BYTEDANCE_AVAILABLE = True
-    logger.info("ByteDance Piano Transcription available for analysis")
+    logger.info("✓ ByteDance Piano Transcription (piano-transcription-inference) available for analysis")
 except ImportError as e:
     BYTEDANCE_AVAILABLE = False
-    logger.warning(f"ByteDance not available, using fallback methods: {e}")
-
-logger = logging.getLogger(__name__)
+    logger.warning(f"✗ ByteDance Piano Transcription not available: {e}")
+    logger.warning("  Falling back to librosa-based onset detection")
+    logger.warning("  To enable ByteDance: pip install piano-transcription-inference")
 
 # Analysis parameters
 DEFAULT_SR = 22050
@@ -229,6 +285,8 @@ def extract_tempo(alignment: List[Tuple[Any, float]], beats: List[float]) -> Fea
 
 
 def extract_articulation(
+    # Currently flawed. Doesn't account for eigth, sixteenth notes, and grace / ghost notes.
+    # Once we prioritize onset over beats, articulation will become accurate. 
     alignment_with_durations: List[Tuple[Any, float, float]], 
     nominal_durations: List[float], 
     beats: List[float]
@@ -557,12 +615,14 @@ def analyze_audio_pair(student_path: str, reference_path: str = None) -> Dict[st
         Dictionary with comprehensive analysis results
     """
     logger.info(f"Starting comprehensive audio analysis for {student_path}")
+    logger.info(f"  BYTEDANCE_AVAILABLE = {BYTEDANCE_AVAILABLE}")
 
     try:
         # Analyze student performance with ByteDance (primary) or onset detection (fallback)
         if BYTEDANCE_AVAILABLE:
             try:
-                logger.info("Using ByteDance Piano Transcription for superior accuracy")
+                logger.info(">>> USING ByteDance Piano Transcription for student analysis")
+                logger.info(f"    Audio file: {student_path}")
                 student_analysis = analyze_piano_performance(student_path)
                 
                 # Convert ByteDance format to expected format
@@ -576,13 +636,17 @@ def analyze_audio_pair(student_path: str, reference_path: str = None) -> Dict[st
                     'chord_analysis': student_analysis.get('chord_analysis', {}),
                     'transcription_quality': student_analysis.get('transcription_quality', {})
                 }
+                logger.info(f"    ✓ ByteDance SUCCESS: {len(student_analysis['notes'])} notes, {len(student_analysis['onsets'])} onsets")
                 
             except Exception as e:
-                logger.warning(f"ByteDance failed for student: {e}, using fallback")
+                logger.warning(f"    ✗ ByteDance FAILED for student: {e}")
+                logger.warning(f"    >>> Falling back to librosa onset detection")
                 student_analysis_converted = detect_onsets_and_frames(student_path, method='librosa')
+                logger.info(f"    ✓ Librosa fallback SUCCESS: {len(student_analysis_converted['onsets'])} onsets")
         else:
-            logger.info("ByteDance not available, using multi-method onset detection")
+            logger.info(">>> USING librosa onset detection (ByteDance not available)")
             student_analysis_converted = detect_onsets_and_frames(student_path, method='librosa')
+            logger.info(f"    ✓ Librosa SUCCESS: {len(student_analysis_converted['onsets'])} onsets")
         
         logger.info(f"Student analysis: {len(student_analysis_converted['onsets'])} onsets detected using {student_analysis_converted.get('analysis_method', 'unknown')}")
 
@@ -604,7 +668,8 @@ def analyze_audio_pair(student_path: str, reference_path: str = None) -> Dict[st
         if reference_path:
             if BYTEDANCE_AVAILABLE:
                 try:
-                    logger.info("Using ByteDance Piano Transcription for reference analysis")
+                    logger.info(">>> USING ByteDance Piano Transcription for reference analysis")
+                    logger.info(f"    Audio file: {reference_path}")
                     ref_analysis = analyze_piano_performance(reference_path)
                     
                     # Convert ByteDance format
@@ -618,12 +683,17 @@ def analyze_audio_pair(student_path: str, reference_path: str = None) -> Dict[st
                         'chord_analysis': ref_analysis.get('chord_analysis', {}),
                         'transcription_quality': ref_analysis.get('transcription_quality', {})
                     }
+                    logger.info(f"    ✓ ByteDance SUCCESS: {len(ref_analysis['notes'])} notes, {len(ref_analysis['onsets'])} onsets")
                     
                 except Exception as e:
-                    logger.warning(f"ByteDance failed for reference: {e}, using fallback")
+                    logger.warning(f"    ✗ ByteDance FAILED for reference: {e}")
+                    logger.warning(f"    >>> Falling back to librosa onset detection")
                     reference_analysis = detect_onsets_and_frames(reference_path, method='librosa')
+                    logger.info(f"    ✓ Librosa fallback SUCCESS: {len(reference_analysis['onsets'])} onsets")
             else:
+                logger.info(">>> USING librosa onset detection for reference (ByteDance not available)")
                 reference_analysis = detect_onsets_and_frames(reference_path, method='librosa')
+                logger.info(f"    ✓ Librosa SUCCESS: {len(reference_analysis['onsets'])} onsets")
                 
             logger.info(f"Reference analysis: {len(reference_analysis['onsets'])} onsets detected using {reference_analysis.get('analysis_method', 'unknown')}")
             
@@ -644,6 +714,10 @@ def analyze_audio_pair(student_path: str, reference_path: str = None) -> Dict[st
         results['assessment'] = generate_performance_assessment(student_analysis, results.get('comparison'))
         
         logger.info("Comprehensive analysis completed successfully")
+        
+        # Export result to JSON for debugging (additive, does not affect return)
+        _export_analysis_result_to_json(results, prefix="analyze_audio_pair")
+        
         return results
         
     except Exception as e:

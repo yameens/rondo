@@ -4,7 +4,7 @@
 
 This is a comprehensive AI-powered piano teaching system with real-time performance analysis, expressive feedback, and interactive practice sessions.
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 - Docker Desktop installed and running

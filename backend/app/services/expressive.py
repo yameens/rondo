@@ -3,8 +3,11 @@ Expressive feature envelope services for aggregating reference performances
 and computing student deviations.
 """
 
+import json
 import logging
 from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime
+from pathlib import Path
 import numpy as np
 from sqlalchemy.orm import Session
 
@@ -13,6 +16,68 @@ from ..api.schemas import EnvelopeOut, FeatureCurve, ExpressiveFeatures
 from ..database import SessionLocal
 
 logger = logging.getLogger(__name__)
+
+
+def _export_envelopes_to_json(score_id: int, db: Session) -> Optional[str]:
+    """
+    Export all envelopes for a score to JSON file for debugging.
+    
+    Args:
+        score_id: Score piece ID
+        db: Database session
+        
+    Returns:
+        Path to exported file, or None if export failed
+    """
+    try:
+        # Create exports/envelopes directory if it doesn't exist
+        exports_dir = Path(__file__).parent.parent.parent / "exports" / "envelopes"
+        exports_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Query all envelopes for this score
+        envelopes_db = db.query(Envelope).filter(
+            Envelope.score_id == score_id
+        ).all()
+        
+        if not envelopes_db:
+            logger.warning(f"[DEBUG EXPORT] No envelopes found for score_id={score_id}")
+            return None
+        
+        # Build export data
+        export_data = {
+            "score_id": score_id,
+            "exported_at": datetime.now().isoformat(),
+            "envelope_count": len(envelopes_db),
+            "envelopes": []
+        }
+        
+        for env in envelopes_db:
+            envelope_dict = {
+                "id": env.id,
+                "score_id": env.score_id,
+                "feature": env.feature.value if hasattr(env.feature, 'value') else str(env.feature),
+                "beats": env.beats,
+                "p20": env.p20,
+                "median": env.median,
+                "p80": env.p80,
+                "n_refs": env.n_refs,
+                "created_at": env.created_at.isoformat() if env.created_at else None
+            }
+            export_data["envelopes"].append(envelope_dict)
+        
+        # Write to file
+        filename = f"score_{score_id}_envelopes.json"
+        filepath = exports_dir / filename
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(export_data, f, indent=2)
+        
+        logger.info(f"[DEBUG EXPORT] Envelopes for score_id={score_id} exported to: {filepath}")
+        return str(filepath)
+        
+    except Exception as e:
+        logger.warning(f"[DEBUG EXPORT] Failed to export envelopes for score_id={score_id}: {e}")
+        return None
 
 
 def aggregate_envelope(
@@ -465,6 +530,9 @@ def compute_and_persist_envelopes(
         
         # Persist to database
         persist_envelopes(envelopes, db)
+        
+        # Export envelopes to JSON for debugging (additive, does not affect return)
+        _export_envelopes_to_json(score_id, db)
         
         return envelopes
         

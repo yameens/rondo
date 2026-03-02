@@ -29,8 +29,10 @@ class ScorePiece(Base):
     __tablename__ = "score_pieces"
 
     id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    composer = Column(String, nullable=False)
     slug = Column(String, unique=True, index=True, nullable=False)
-    musicxml_path = Column(String, nullable=False)
+    musicxml_path = Column(String, nullable=True)  # Optional - not required for basic workflow
     beats_json = Column(JSON, nullable=True)  # Array of normalized beat indices and nominal durations
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

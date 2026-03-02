@@ -1,5 +1,5 @@
 """
-Professional Piano Transcription using ByteDance's superior model.
+Professional Piano Transcription using ByteDance's model.
 Replaces Basic Pitch with much better chord detection and timing accuracy.
 """
 

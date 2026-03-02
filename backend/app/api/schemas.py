@@ -24,16 +24,20 @@ class FeatureEnum(str, Enum):
 # Score Piece Schemas
 class ScorePieceIn(BaseModel):
     """Input schema for creating a score piece."""
-    slug: str = Field(..., description="Unique identifier for the score piece")
-    musicxml_path: str = Field(..., description="Path to the MusicXML file")
+    title: str = Field(..., description="Title of the piece")
+    composer: str = Field(..., description="Composer of the piece")
+    slug: Optional[str] = Field(None, description="Unique identifier (auto-generated if not provided)")
+    musicxml_path: Optional[str] = Field(None, description="Path to the MusicXML file (optional)")
 
 
 class ScorePieceOut(BaseModel):
     """Output schema for score piece."""
     id: int
+    title: str
+    composer: str
     slug: str
-    musicxml_path: str
-    created_at: datetime
+    musicxml_path: Optional[str] = None
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -88,7 +92,7 @@ class EnvelopeOut(BaseModel):
     median: List[float] = Field(..., description="Median values")
     p80: List[float] = Field(..., description="80th percentile values")
     n_refs: int = Field(..., description="Number of reference performances")
-    created_at: datetime
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -110,3 +114,33 @@ class AnalysisResult(BaseModel):
     midi_estimates: Dict[str, Any]
     user_audio_url: Optional[str] = None
     ref_audio_url: Optional[str] = None
+
+
+# Measure-level accuracy schemas
+class DeviationLevel(str, Enum):
+    """Deviation level classification."""
+    within = "within"
+    moderate = "moderate"
+    high = "high"
+
+
+class MeasureScore(BaseModel):
+    """Schema for per-measure accuracy data."""
+    measure: int = Field(..., description="Measure number (1-indexed)")
+    tempo_deviation: Optional[float] = Field(None, description="Tempo deviation for this measure")
+    loudness_deviation: Optional[float] = Field(None, description="Loudness deviation for this measure")
+    articulation_deviation: Optional[float] = Field(None, description="Articulation deviation for this measure")
+    pedal_deviation: Optional[float] = Field(None, description="Pedal deviation for this measure")
+    balance_deviation: Optional[float] = Field(None, description="Balance deviation for this measure")
+    mean_deviation: float = Field(..., description="Mean deviation across all features")
+    in_range: bool = Field(..., description="Whether the measure is within acceptable range")
+    deviation_level: DeviationLevel = Field(..., description="Deviation classification")
+    accuracy_score: float = Field(..., description="Accuracy score (0-100, higher is better)")
+
+
+class ExpressiveScoreResponse(BaseModel):
+    """Schema for expressive score analysis response."""
+    perBeat: Dict[str, Any] = Field(..., description="Per-beat distance metrics")
+    byMeasure: Dict[str, Dict[str, float]] = Field(..., description="Per-measure feature scores")
+    overall: Dict[str, Any] = Field(..., description="Overall expressiveness scores")
+    measure_scores: List[MeasureScore] = Field(default=[], description="Per-measure accuracy data")

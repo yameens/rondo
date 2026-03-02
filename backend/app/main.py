@@ -70,13 +70,25 @@ async def create_score_piece(
     db: Session = Depends(get_db)
 ):
     """Create a new score piece."""
+    import re
+    
+    # Generate slug from title if not provided
+    slug = score.slug
+    if not slug:
+        # Create slug from title and composer
+        slug = f"{score.composer.lower()}-{score.title.lower()}"
+        slug = re.sub(r'[^a-z0-9]+', '-', slug)
+        slug = slug.strip('-')
+    
     # Check if slug already exists
-    existing = db.query(ScorePiece).filter(ScorePiece.slug == score.slug).first()
+    existing = db.query(ScorePiece).filter(ScorePiece.slug == slug).first()
     if existing:
         raise HTTPException(status_code=400, detail="Score piece with this slug already exists")
     
     db_score = ScorePiece(
-        slug=score.slug,
+        title=score.title,
+        composer=score.composer,
+        slug=slug,
         musicxml_path=score.musicxml_path
     )
     db.add(db_score)
@@ -106,6 +118,90 @@ async def get_score_piece(
     if not score:
         raise HTTPException(status_code=404, detail="Score piece not found")
     return score
+
+
+@app.get("/scores/{score_id}/musicxml")
+async def get_score_musicxml(
+    score_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Get MusicXML content for a score piece.
+    Returns the MusicXML file content if available, or a generated placeholder.
+    """
+    from fastapi.responses import Response
+    import os
+    
+    score = db.query(ScorePiece).filter(ScorePiece.id == score_id).first()
+    if not score:
+        raise HTTPException(status_code=404, detail="Score piece not found")
+    
+    # Try to load MusicXML from file if path exists
+    if score.musicxml_path and os.path.exists(score.musicxml_path):
+        try:
+            with open(score.musicxml_path, 'r', encoding='utf-8') as f:
+                musicxml_content = f.read()
+            return Response(content=musicxml_content, media_type="application/xml")
+        except Exception as e:
+            logger.warning(f"Failed to read MusicXML file {score.musicxml_path}: {e}")
+    
+    # Generate a placeholder MusicXML based on the score's beat grid
+    # This creates a visual representation of the analysis timeline
+    beats_json = score.beats_json or [0.0, 0.25, 0.5, 0.75, 1.0]
+    n_beats = len(beats_json)
+    beats_per_measure = 4
+    n_measures = (n_beats + beats_per_measure - 1) // beats_per_measure
+    
+    # Generate MusicXML with placeholder notes for each measure
+    measures_xml = ""
+    for measure_num in range(1, n_measures + 1):
+        if measure_num == 1:
+            # First measure includes attributes
+            measures_xml += f'''
+    <measure number="{measure_num}">
+      <attributes>
+        <divisions>4</divisions>
+        <key><fifths>-3</fifths></key>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note><pitch><step>E</step><alter>-1</alter><octave>4</octave></pitch><duration>4</duration><type>quarter</type></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><type>quarter</type></note>
+      <note><pitch><step>B</step><alter>-1</alter><octave>4</octave></pitch><duration>4</duration><type>quarter</type></note>
+      <note><pitch><step>E</step><alter>-1</alter><octave>5</octave></pitch><duration>4</duration><type>quarter</type></note>
+    </measure>'''
+        else:
+            # Subsequent measures - vary the notes slightly
+            step = ['C', 'D', 'E', 'F', 'G', 'A', 'B'][(measure_num - 1) % 7]
+            octave = 4 + ((measure_num - 1) // 7) % 2
+            measures_xml += f'''
+    <measure number="{measure_num}">
+      <note><pitch><step>{step}</step><octave>{octave}</octave></pitch><duration>4</duration><type>quarter</type></note>
+      <note><pitch><step>{step}</step><octave>{octave}</octave></pitch><duration>4</duration><type>quarter</type></note>
+      <note><pitch><step>{step}</step><octave>{octave}</octave></pitch><duration>4</duration><type>quarter</type></note>
+      <note><pitch><step>{step}</step><octave>{octave}</octave></pitch><duration>4</duration><type>quarter</type></note>
+    </measure>'''
+    
+    # Build complete MusicXML document
+    musicxml_content = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
+<score-partwise version="3.1">
+  <work>
+    <work-title>{score.title}</work-title>
+  </work>
+  <identification>
+    <creator type="composer">{score.composer}</creator>
+  </identification>
+  <part-list>
+    <score-part id="P1">
+      <part-name>Piano</part-name>
+    </score-part>
+  </part-list>
+  <part id="P1">{measures_xml}
+  </part>
+</score-partwise>'''
+    
+    return Response(content=musicxml_content, media_type="application/xml")
 
 
 # Performance Endpoints

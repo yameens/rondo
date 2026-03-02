@@ -38,16 +38,31 @@ async def create_score_piece(
     """
     Create a new score piece and compute its beat grid.
     """
+    import re
+    
     try:
-        # Build beat grid from MusicXML
-        beat_data = build_beat_grid(score.musicxml_path)
-        beats_json = beat_data.get("beats", [0.0, 0.25, 0.5, 0.75, 1.0])
+        # Generate slug from title if not provided
+        slug = score.slug
+        if not slug:
+            slug = f"{score.composer.lower()}-{score.title.lower()}"
+            slug = re.sub(r'[^a-z0-9]+', '-', slug)
+            slug = slug.strip('-')
         
-        logger.info(f"Built beat grid with {len(beats_json)} beats for {score.slug}")
+        # Build beat grid from MusicXML if path is provided
+        beats_json = [0.0, 0.25, 0.5, 0.75, 1.0]  # Default beat grid
+        if score.musicxml_path:
+            try:
+                beat_data = build_beat_grid(score.musicxml_path)
+                beats_json = beat_data.get("beats", beats_json)
+                logger.info(f"Built beat grid with {len(beats_json)} beats for {slug}")
+            except Exception as e:
+                logger.warning(f"Could not build beat grid from MusicXML: {e}, using default")
         
         # Create score piece
         db_score = models.ScorePiece(
-            slug=score.slug,
+            title=score.title,
+            composer=score.composer,
+            slug=slug,
             musicxml_path=score.musicxml_path,
             beats_json=beats_json
         )
@@ -56,7 +71,7 @@ async def create_score_piece(
         db.commit()
         db.refresh(db_score)
         
-        logger.info(f"Created score piece {db_score.id}: {score.slug}")
+        logger.info(f"Created score piece {db_score.id}: {slug}")
         
         return db_score
         
@@ -78,18 +93,25 @@ async def upload_reference_performance(
     Upload a reference performance audio file and compute expressive features.
     If async=1, returns job_id for background processing.
     """
+    logger.info(f"Received reference upload request: score_id={score_id}, source={source}, filename={audio.filename}")
+    
     try:
         # Validate score exists
         score = db.query(models.ScorePiece).filter(models.ScorePiece.id == score_id).first()
         if not score:
-            raise HTTPException(status_code=404, detail=f"Score {score_id} not found")
+            logger.error(f"Score {score_id} not found in database")
+            raise HTTPException(status_code=404, detail=f"Score {score_id} not found. Please ensure the score exists in the database.")
+        
+        logger.info(f"Found score: {score.slug}")
         
         # Validate audio file
         if not audio.content_type or not audio.content_type.startswith(('audio/', 'application/octet-stream')):
-            raise HTTPException(status_code=400, detail="Invalid audio file format")
+            logger.error(f"Invalid audio content type: {audio.content_type}")
+            raise HTTPException(status_code=400, detail=f"Invalid audio file format: {audio.content_type}")
         
         # Read audio content
         content = await audio.read()
+        logger.info(f"Read {len(content)} bytes from audio file")
         
         if async_processing:
             # Process asynchronously
@@ -123,6 +145,19 @@ async def upload_reference_performance(
                     duration_s = len(f) / sr
                 
                 logger.info(f"Processing reference audio: {duration_s:.2f}s at {sr}Hz")
+                
+                # If this is the first upload and score has no proper beat grid,
+                # generate one based on audio duration (assuming ~120 BPM as default)
+                if not score.beats_json or len(score.beats_json) <= 5:
+                    estimated_bpm = 120  # Default assumption
+                    beats_per_second = estimated_bpm / 60.0
+                    total_beats = int(duration_s * beats_per_second)
+                    # Generate normalized beat positions (0.0 to 1.0)
+                    new_beat_grid = [i / total_beats for i in range(total_beats + 1)]
+                    score.beats_json = new_beat_grid
+                    db.commit()
+                    db.refresh(score)
+                    logger.info(f"Generated beat grid with {len(new_beat_grid)} beats for score {score_id} (duration: {duration_s:.1f}s)")
                 
                 # Compute expressive features
                 features = compute_expressive_features(score, temp_audio_path, alignment=None)
@@ -170,18 +205,25 @@ async def upload_student_performance(
     Upload a student performance audio file and return computed features.
     If async=1, returns job_id for background processing.
     """
+    logger.info(f"Received student upload request: score_id={score_id}, source={source}, filename={audio.filename}")
+    
     try:
         # Validate score exists
         score = db.query(models.ScorePiece).filter(models.ScorePiece.id == score_id).first()
         if not score:
-            raise HTTPException(status_code=404, detail=f"Score {score_id} not found")
+            logger.error(f"Score {score_id} not found in database")
+            raise HTTPException(status_code=404, detail=f"Score {score_id} not found. Please ensure the score exists in the database.")
+        
+        logger.info(f"Found score: {score.slug}")
         
         # Validate audio file
         if not audio.content_type or not audio.content_type.startswith(('audio/', 'application/octet-stream')):
-            raise HTTPException(status_code=400, detail="Invalid audio file format")
+            logger.error(f"Invalid audio content type: {audio.content_type}")
+            raise HTTPException(status_code=400, detail=f"Invalid audio file format: {audio.content_type}")
         
         # Read audio content
         content = await audio.read()
+        logger.info(f"Read {len(content)} bytes from audio file")
         
         if async_processing:
             # Process asynchronously
@@ -215,6 +257,17 @@ async def upload_student_performance(
                     duration_s = len(f) / sr
                 
                 logger.info(f"Processing student audio: {duration_s:.2f}s at {sr}Hz")
+                
+                # If score has no proper beat grid, generate one based on audio duration
+                if not score.beats_json or len(score.beats_json) <= 5:
+                    estimated_bpm = 120  # Default assumption
+                    beats_per_second = estimated_bpm / 60.0
+                    total_beats = int(duration_s * beats_per_second)
+                    new_beat_grid = [i / total_beats for i in range(total_beats + 1)]
+                    score.beats_json = new_beat_grid
+                    db.commit()
+                    db.refresh(score)
+                    logger.info(f"Generated beat grid with {len(new_beat_grid)} beats for score {score_id} (duration: {duration_s:.1f}s)")
                 
                 # Compute expressive features
                 features = compute_expressive_features(score, temp_audio_path, alignment=None)
@@ -262,11 +315,16 @@ async def build_envelopes(
     """
     Build statistical envelopes from all reference performances for a score.
     """
+    logger.info(f"Received envelope build request for score_id={score_id}")
+    
     try:
         # Validate score exists
         score = db.query(models.ScorePiece).filter(models.ScorePiece.id == score_id).first()
         if not score:
+            logger.error(f"Score {score_id} not found in database")
             raise HTTPException(status_code=404, detail=f"Score {score_id} not found")
+        
+        logger.info(f"Found score: {score.slug}")
         
         # Check if there are reference performances
         ref_count = db.query(models.Performance).filter(
@@ -275,10 +333,20 @@ async def build_envelopes(
             models.Performance.features_json.isnot(None)
         ).count()
         
+        logger.info(f"Found {ref_count} reference performances with features for score {score_id}")
+        
         if ref_count == 0:
+            # List all performances for debugging
+            all_perfs = db.query(models.Performance).filter(
+                models.Performance.score_id == score_id
+            ).all()
+            logger.error(f"No reference performances with features. Total performances for score: {len(all_perfs)}")
+            for p in all_perfs:
+                logger.error(f"  - Perf {p.id}: role={p.role}, has_features={p.features_json is not None}")
+            
             raise HTTPException(
                 status_code=400, 
-                detail=f"No reference performances with features found for score {score_id}"
+                detail=f"No reference performances with features found for score {score_id}. Found {len(all_perfs)} total performances."
             )
         
         logger.info(f"Building envelopes from {ref_count} reference performances")
@@ -286,14 +354,14 @@ async def build_envelopes(
         # Compute and persist envelopes
         envelopes = compute_and_persist_envelopes(score_id, db)
         
-        logger.info(f"Built {len(envelopes)} envelopes for score {score_id}")
+        logger.info(f"Successfully built {len(envelopes)} envelopes for score {score_id}")
         
         return envelopes
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to build envelopes: {e}")
+        logger.error(f"Failed to build envelopes: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to build envelopes: {str(e)}")
 
 
@@ -437,29 +505,82 @@ async def compute_expressive_score(
         
         overall_expressiveness = weighted_score / total_weight if total_weight > 0 else 0
         
-        # Group beats into measures (assuming 4 beats per measure for now)
+        # Group beats into measures (assuming 4 beats per measure)
         beats_per_measure = 4
         by_measure = {}
+        measure_scores_list = []
         
         if envelopes:
             first_envelope = next(iter(envelopes.values()))
             n_beats = len(first_envelope.beats)
             n_measures = (n_beats + beats_per_measure - 1) // beats_per_measure
             
+            # Collect all mean deviations to compute thresholds
+            all_mean_deviations = []
+            
             for measure_idx in range(n_measures):
                 start_beat = measure_idx * beats_per_measure
                 end_beat = min(start_beat + beats_per_measure, n_beats)
                 
-                measure_scores = {}
+                measure_feature_scores = {}
+                measure_deviations = {}
+                deviation_values = []
+                
                 for feature_name, distances in feature_distances.items():
                     if distances and 'scaled_deviations' in distances:
                         measure_devs = distances['scaled_deviations'][start_beat:end_beat]
                         if measure_devs:
                             avg_dev = sum(measure_devs) / len(measure_devs)
                             measure_score = max(0, min(100, 100 - (avg_dev * 20)))
-                            measure_scores[feature_name] = measure_score
+                            measure_feature_scores[feature_name] = measure_score
+                            measure_deviations[feature_name] = round(avg_dev, 3)
+                            deviation_values.append(avg_dev)
                 
-                by_measure[f"measure_{measure_idx + 1}"] = measure_scores
+                by_measure[f"measure_{measure_idx + 1}"] = measure_feature_scores
+                
+                # Calculate mean deviation across all features for this measure
+                mean_deviation = sum(deviation_values) / len(deviation_values) if deviation_values else 0
+                all_mean_deviations.append((measure_idx, mean_deviation, measure_deviations))
+            
+            # Compute thresholds for deviation levels (33rd and 67th percentile)
+            sorted_devs = sorted([d[1] for d in all_mean_deviations])
+            if len(sorted_devs) >= 3:
+                low_threshold = sorted_devs[len(sorted_devs) // 3]
+                high_threshold = sorted_devs[(2 * len(sorted_devs)) // 3]
+            else:
+                low_threshold = 1.0
+                high_threshold = 2.0
+            
+            # Build measure_scores list with deviation levels
+            for measure_idx, mean_deviation, measure_deviations in all_mean_deviations:
+                # Determine deviation level
+                if mean_deviation <= low_threshold:
+                    deviation_level = "within"
+                    in_range = True
+                elif mean_deviation <= high_threshold:
+                    deviation_level = "moderate"
+                    in_range = False
+                else:
+                    deviation_level = "high"
+                    in_range = False
+                
+                # Calculate accuracy score (inverse of deviation, scaled to 0-100)
+                # Lower deviation = higher accuracy
+                accuracy_score = max(0, min(100, 100 - (mean_deviation * 20)))
+                
+                measure_score_entry = {
+                    "measure": measure_idx + 1,
+                    "tempo_deviation": measure_deviations.get("tempo"),
+                    "loudness_deviation": measure_deviations.get("loudness"),
+                    "articulation_deviation": measure_deviations.get("articulation"),
+                    "pedal_deviation": measure_deviations.get("pedal"),
+                    "balance_deviation": measure_deviations.get("balance"),
+                    "mean_deviation": round(mean_deviation, 3),
+                    "in_range": in_range,
+                    "deviation_level": deviation_level,
+                    "accuracy_score": round(accuracy_score, 1)
+                }
+                measure_scores_list.append(measure_score_entry)
         
         result = {
             "perBeat": feature_distances,
@@ -468,7 +589,8 @@ async def compute_expressive_score(
                 "expressiveness": round(overall_expressiveness, 2),
                 "featureScores": feature_scores,
                 "weights": FEATURE_WEIGHTS
-            }
+            },
+            "measure_scores": measure_scores_list
         }
         
         logger.info(f"Computed expressive score: {overall_expressiveness:.2f}")
